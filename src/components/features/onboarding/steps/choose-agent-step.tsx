@@ -130,6 +130,20 @@ export function ChooseAgentStep({
       return;
     }
 
+    // On a local backend, selecting an ACP agent does not rewrite global
+    // agent settings on Next. The selection takes effect only when the user
+    // completes onboarding and saves it to the active agent profile.
+    // However, selecting OpenHands still writes agent_kind: "openhands" to
+    // restore settings left on ACP.
+    // On Cloud, global agent_settings is what launches use, so the diff is
+    // persisted immediately.
+    const isLocalBackend = backendKind !== "cloud";
+    const isAcpChoice = selectedAgentId !== "openhands";
+    if (isLocalBackend && isAcpChoice) {
+      onNext();
+      return;
+    }
+
     saveSettings(
       { agent_settings_diff: diff },
       {

@@ -180,9 +180,81 @@ describe("ChooseAgentStep", () => {
     expect(call.agent_settings_diff).toEqual({ agent_kind: "openhands" });
   });
 
+  it.each([["claude-code"], ["codex"], ["gemini-cli"], ["pi"], ["opencode"]])(
+    "advances without dispatching a settings write when an ACP tile (%s) is selected on a local backend",
+    async (id) => {
+      const save = vi.spyOn(SettingsService, "saveSettings");
+      const { onNext } = renderStep(id as OnboardingAgentId);
+      const user = userEvent.setup();
+
+      await user.click(screen.getByTestId("onboarding-agent-next"));
+
+      expect(onNext).toHaveBeenCalledTimes(1);
+      expect(save).not.toHaveBeenCalled();
+    },
+  );
+});
+
+describe("ChooseAgentStep on a cloud backend", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.spyOn(SettingsService, "saveSettings").mockResolvedValue(true);
+    __resetActiveStoreForTests();
+    setRegisteredBackends([
+      {
+        id: "cloud-1",
+        name: "Cloud",
+        host: "https://app.example.com",
+        apiKey: "key",
+        kind: "cloud",
+      },
+    ]);
+    setActiveSelection({ backendId: "cloud-1", orgId: null });
+  });
+  afterEach(() => {
+    window.localStorage.clear();
+    __resetActiveStoreForTests();
+  });
+
+  function renderCloudStep(initial: OnboardingAgentId = "openhands") {
+    const onSelect = vi.fn();
+    const onNext = vi.fn();
+    render(
+      <QueryClientProvider
+        client={
+          new QueryClient({ defaultOptions: { queries: { retry: false } } })
+        }
+      >
+        <ActiveBackendProvider>
+          <ChooseAgentStep
+            selectedAgentId={initial}
+            onSelect={onSelect}
+            onNext={onNext}
+          />
+        </ActiveBackendProvider>
+      </QueryClientProvider>,
+    );
+    return { onSelect, onNext };
+  }
+
+  it("hides local-only agents and drops a selection Cloud can't run", () => {
+    const { onSelect } = renderCloudStep("pi");
+
+    expect(
+      screen.getByTestId("onboarding-agent-option-claude-code"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("onboarding-agent-option-pi"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("onboarding-agent-option-opencode"),
+    ).not.toBeInTheDocument();
+    expect(onSelect).toHaveBeenCalledWith("openhands");
+  });
+
   it("persists an ACP diff for Claude Code that leaves the model to the agent", async () => {
     const save = vi.spyOn(SettingsService, "saveSettings");
-    const { onNext } = renderStep("claude-code");
+    const { onNext } = renderCloudStep("claude-code");
     const user = userEvent.setup();
 
     await user.click(screen.getByTestId("onboarding-agent-next"));
@@ -212,11 +284,9 @@ describe("ChooseAgentStep", () => {
   it.each([
     ["codex", "codex"],
     ["gemini-cli", "gemini-cli"],
-    ["pi", "pi"],
-    ["opencode", "opencode"],
   ])("persists acp_server=%s for the matching tile", async (id, expected) => {
     const save = vi.spyOn(SettingsService, "saveSettings");
-    renderStep(id as OnboardingAgentId);
+    renderCloudStep(id as OnboardingAgentId);
     const user = userEvent.setup();
 
     await user.click(screen.getByTestId("onboarding-agent-next"));
@@ -244,9 +314,6 @@ describe("ChooseAgentStep", () => {
   });
 
   it("rebuilds the diff cleanly when the user flips between ACP providers", async () => {
-    // Bot-flagged: would a stale claude-code selection leak into a
-    // subsequent codex save? The helper rebuilds from the current
-    // selectedAgentId on each Next click, so no — but pin it.
     const save = vi.spyOn(SettingsService, "saveSettings");
     const { rerender } = render(
       <QueryClientProvider
@@ -254,11 +321,13 @@ describe("ChooseAgentStep", () => {
           new QueryClient({ defaultOptions: { queries: { retry: false } } })
         }
       >
-        <ChooseAgentStep
-          selectedAgentId="claude-code"
-          onSelect={vi.fn()}
-          onNext={vi.fn()}
-        />
+        <ActiveBackendProvider>
+          <ChooseAgentStep
+            selectedAgentId="claude-code"
+            onSelect={vi.fn()}
+            onNext={vi.fn()}
+          />
+        </ActiveBackendProvider>
       </QueryClientProvider>,
     );
     const user = userEvent.setup();
@@ -274,9 +343,6 @@ describe("ChooseAgentStep", () => {
       ).agent_settings_diff?.acp_server,
     ).toBe("claude-code");
 
-    // Switch the *parent's* selection (the modal's setSelectedAgentId)
-    // and click Next again — the second save should carry codex, not
-    // a stale claude-code value.
     save.mockClear();
     rerender(
       <QueryClientProvider
@@ -284,11 +350,13 @@ describe("ChooseAgentStep", () => {
           new QueryClient({ defaultOptions: { queries: { retry: false } } })
         }
       >
-        <ChooseAgentStep
-          selectedAgentId="codex"
-          onSelect={vi.fn()}
-          onNext={vi.fn()}
-        />
+        <ActiveBackendProvider>
+          <ChooseAgentStep
+            selectedAgentId="codex"
+            onSelect={vi.fn()}
+            onNext={vi.fn()}
+          />
+        </ActiveBackendProvider>
       </QueryClientProvider>,
     );
     await user.click(screen.getByTestId("onboarding-agent-next"));
@@ -308,12 +376,11 @@ describe("ChooseAgentStep", () => {
     vi.spyOn(SettingsService, "saveSettings").mockRejectedValueOnce(
       new Error("boom"),
     );
-    const { onNext } = renderStep("claude-code");
+    const { onNext } = renderCloudStep("claude-code");
     const user = userEvent.setup();
 
     await user.click(screen.getByTestId("onboarding-agent-next"));
 
-    // saveSettings rejects → onSuccess is not called → onNext stays untouched.
     await waitFor(
       () => {
         expect(SettingsService.saveSettings).toHaveBeenCalledTimes(1);
@@ -321,56 +388,5 @@ describe("ChooseAgentStep", () => {
       { timeout: 1000 },
     );
     expect(onNext).not.toHaveBeenCalled();
-  });
-});
-
-describe("ChooseAgentStep on a cloud backend", () => {
-  beforeEach(() => {
-    vi.restoreAllMocks();
-    __resetActiveStoreForTests();
-    setRegisteredBackends([
-      {
-        id: "cloud-1",
-        name: "Cloud",
-        host: "https://app.example.com",
-        apiKey: "key",
-        kind: "cloud",
-      },
-    ]);
-    setActiveSelection({ backendId: "cloud-1", orgId: null });
-  });
-  afterEach(() => {
-    window.localStorage.clear();
-    __resetActiveStoreForTests();
-  });
-
-  it("hides local-only agents and drops a selection Cloud can't run", () => {
-    const onSelect = vi.fn();
-    render(
-      <QueryClientProvider
-        client={
-          new QueryClient({ defaultOptions: { queries: { retry: false } } })
-        }
-      >
-        <ActiveBackendProvider>
-          <ChooseAgentStep
-            selectedAgentId="pi"
-            onSelect={onSelect}
-            onNext={vi.fn()}
-          />
-        </ActiveBackendProvider>
-      </QueryClientProvider>,
-    );
-
-    expect(
-      screen.getByTestId("onboarding-agent-option-claude-code"),
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByTestId("onboarding-agent-option-pi"),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByTestId("onboarding-agent-option-opencode"),
-    ).not.toBeInTheDocument();
-    expect(onSelect).toHaveBeenCalledWith("openhands");
   });
 });
